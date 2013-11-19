@@ -1,0 +1,161 @@
+#!/usr/bin/env perl
+#
+# check_rsync_backups
+#	-- check the health of backups for all targets of rsync-backup.
+#
+# Author: Greg Boyington <greg@automagick.us>
+#
+# :vim: set syn=perl
+
+use Nagios::Plugin;
+use File::Find;
+use strict;
+
+# set up the nagios plugin object and parse the command-line options.
+my $np = Nagios::Plugin->new(
+	shortname => "BACKUPS",
+	usage => "Usage: %s -d|--dir=<spool_dir>[ -v|--verbose ] [ -c|--critical=<threshold> ] [ -w|--warning=<threshold> ]",
+);
+$np->add_arg(
+	spec => "dir|d=s",
+	help => "-d, --dir=/PATH/TO/RSYNC-BACKUP/SPOOL"
+);
+$np->add_arg(
+	spec => "warning|w=s",
+	help => "-w, --warning=SECONDS",
+	default => 43200,
+);
+$np->add_arg(
+	spec => "critical|c=s",
+	help => "-c, --critical=SECONDS",
+	default => 86400,
+);
+$np->getopts;
+
+# we must have a path to the rsync-backup spool directory, and it must exist.
+$np->nagios_die("Directory " . $np->opts->dir . " doesn't exist!")
+	unless -d $np->opts->dir;
+
+# make sure the spool dir has a trailing /
+my $spool_dir = $np->opts->dir =~ m'/$' ? $np->opts->dir :  $np->opts->dir . '/';
+
+# walk the spool directory and look files called $spool_dir/*/last_run.  For each one
+# we find, compare its modification time to the warning/critical thresholds and append
+# the target to either @errors or @warnaings, as necessary.
+my @errors;
+my @warnings;
+my $count = 0;
+find({
+	preprocess => sub {
+		# avoid walking the entire directory tree; we only care about $spool_dir/*.
+		my $depth = ($File::Find::dir =~ tr[/][]) - ($spool_dir =~ tr[/][]);
+		return if $depth != -1;
+		return @_;
+	},
+	wanted => sub {
+		# we only care about directories other than the spool_dir.
+		if (-d && $_ ne '.') {
+
+			# remember how many targets we've checked.
+			$count++;
+
+			# check the target's directory for a file called 'last_run'.
+			my $last_run = $File::Find::name . '/last_run';
+
+			# if it doesn't exist, we do not have a full backup. eep!
+			if (! -e $last_run) {
+				push @errors, $_ . ": NO BACKUP";
+
+			# we have at least one backup, so determine how old it is.
+			} else {
+				my $mtime = (stat($last_run))[9];
+				my $age = time - $mtime;
+
+				# append the target name and its last backup timestamp to 
+				# either @errors or @warnings, depending on the threshold.
+				if ( $age >= $np->opts->critical) {
+					push @errors, $_ . ": " . scalar(localtime($mtime));
+				} elsif ($age >= $np->opts->warning) {
+					push @warnings, $_ . ": " . scalar(localtime($mtime));
+				} 
+			}
+		}
+	},
+}, $np->opts->dir);
+
+# exit with the appropriate exit code and message based on the results of our walk.
+$np->nagios_exit(CRITICAL, join("\n", @errors))
+	if @errors;
+$np->nagios_exit(WARNING, join("\n", @warnings))
+	if @warnings;
+$np->nagios_exit(UNKNOWN, "No backup targets found.")
+	unless $count;
+$np->nagios_exit(OK, "All targets have current backups.");
+
+__END__
+
+=head1 NAME
+
+check_rsync_backups -- nagios plugin to monitor health of rsync-backup.pl spools
+
+=head1 SYNOPSIS
+
+check_rsync_backups -d|--dir=<spool_dir> [ -c|--critical=<threshold> ] [ -w|--warning=<threshold> ]
+
+=head1 DESCRIPTION
+
+This is a simple plugin that checks the modified time of the 'last_run' file of each 
+rsync-backup.pl target. Age thresholds can be specified with -w and -c.
+
+=head1 PREREQUISITES
+
+=over
+
+=item * Nagios::Plugin
+
+=back
+
+=head1 COMMAND-LINE SWITCHES
+
+The following switches are supported:
+
+=over
+
+=item B<-d>, B<--dir>       The path to the rsync-backup.pl spool directory; required.
+
+=item B<-w>, B<--warning>   The age in seconds that a last_run file mtime should generate a warning.
+Defaults to 43200 (12 hours)
+
+=item B<-c>, B<--critical>  The age in seconds that a last_run file mtime should generate a
+critical. Defaults to 86400 (24 hours)
+
+=back
+
+=head1 USAGE NOTES
+
+This is a standard nagios plugin; use it as you would any other.  Note however that you may need 
+to explicitly grant your nagios process user the ability to stat the last_run files in your
+rsync-backup.pl spool directory.  One (unixy) way to do this is:
+
+=over
+
+# chgrp nagios /var/backups /var/backups/*
+# chmod 2755 /var/backups
+
+=back
+
+This will ensure that existing target directories are read/execute by the nagios group, and any targets
+created in the future will automatically be group read/execute.
+
+
+=head1 VERSION
+
+This is version 1.0 of check_rsync_backups.
+
+=head1 AUTHOR
+
+rsync-backup.pl was written by Greg Boyington <greg@automagick.us>
+
+=head1 LICENSE
+
+(k) 3166 YOLD. Do what thou wilt, but dont blame me.
